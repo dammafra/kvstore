@@ -1,5 +1,0 @@
-[0m[[0m[33mwarn[0m] [0m[0mC:\Users\Francesco Dammacco\workspaces\edx\programming-reactive-systems\kvstore\src\main\scala\kvstore\Replica.scala:74:9: match may not be exhaustive.[0m
-[0m[[0m[33mwarn[0m] [0m[0mIt would fail on the following input: None[0m
-[0m[[0m[33mwarn[0m] [0m[0m        pending match {[0m
-[0m[[0m[33mwarn[0m] [0m[0m        ^[0m
-[0m[[0m[33mwarn[0m] [0m[0mone warning found[0m
