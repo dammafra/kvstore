@@ -25,7 +25,7 @@ trait IntegrationSpec
 
   test("Integration-case: Primary and secondaries must work in concert when persistence is unreliable") {
     val arbiter = TestProbe()
-    val primary = system.actorOf(Replica.props(arbiter.ref, Persistence.props(flaky = false)), "integration-case-primary")
+    val primary = system.actorOf(Replica.props(arbiter.ref, Persistence.props(flaky = true)), "integration-case-primary")
     val user = session(primary)
     val secondary = TestProbe()
 
