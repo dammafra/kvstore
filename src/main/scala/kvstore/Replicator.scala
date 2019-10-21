@@ -32,7 +32,7 @@ class Replicator(val replica: ActorRef) extends Actor {
   }
 
   def waitingReplication(id: Long, cancellable: Cancellable, requester: ActorRef): Receive = {
-    case SnapshotAck(key, id) =>
+    case SnapshotAck(key, _) =>
       cancellable.cancel()
       requester ! Replicated(key, id)
       context.become(receive)

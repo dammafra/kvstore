@@ -39,7 +39,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   import context.dispatcher
 
   arbiter ! Join
-  context.setReceiveTimeout(1.second)
 
   var kv: Map[String, String] = Map.empty
   var persistence: ActorRef = context.actorOf(persistenceProps)
@@ -66,6 +65,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   def persisting: Receive = receivingGet orElse {
     case Persisted(_, id) =>
       cancellable.cancel()
+      updatePending(id, persistence)
       resolvePending(id)
   }
 
@@ -79,22 +79,20 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
 
       case Insert(key, value, id) =>
         kv = kv + (key -> value)
-        val tuple = (replicasToReplicators.values.toSet, sender, OperationAck(id))
-        pendingRequests = pendingRequests + (id -> tuple)
-        persist(key, Some(value), id)
+        persist(key, Some(value), id, OperationAck(id))
         replicate(key, Some(value), id)
+        context.setReceiveTimeout(1.second)
 
       case Remove(key, id) =>
         kv = kv - key
-        val tuple = (replicasToReplicators.values.toSet, sender, OperationAck(id))
-        pendingRequests = pendingRequests + (id -> tuple)
-        persist(key, None, id)
+        persist(key, None, id, OperationAck(id))
         replicate(key, None, id)
+        context.setReceiveTimeout(1.second)
     }
 
   def replicating: Receive = {
     case Replicated(_, id) =>
-      updatePending(sender)
+      updatePending(id, sender)
       resolvePending(id)
   }
 
@@ -102,16 +100,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case Replicas(replicas) =>
       val secondaries = replicas - self
 
-      replicasToReplicators.keys.toSet diff secondaries foreach (r => {
+      replicasToReplicators.keySet diff secondaries foreach (r => {
         context.stop(replicasToReplicators(r))
-        updatePending(replicasToReplicators(r))
-        pendingRequests foreach {
-          case (id, _) => resolvePending(id)
-        }
+        pendingRequests.keySet.foreach(k => {
+          updatePending(k, replicasToReplicators(r))
+          resolvePending(k)
+        })
       })
 
-      replicasToReplicators = replicasToReplicators -- (replicasToReplicators.keys.toSet diff secondaries)
-      secondaries diff replicasToReplicators.keys.toSet foreach (r => {
+      replicasToReplicators = replicasToReplicators -- (replicasToReplicators.keySet diff secondaries)
+      secondaries diff replicasToReplicators.keySet foreach (r => {
         val replicator = context.actorOf(Replicator.props(r))
         replicasToReplicators = replicasToReplicators + (r -> replicator)
 
@@ -128,6 +126,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         case (id, (_, requester, _)) =>
           requester ! OperationFailed(id)
           pendingRequests = pendingRequests - id
+          context.setReceiveTimeout(Duration.Undefined)
       }
   }
 
@@ -138,9 +137,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       case Snapshot(key, valueOption, seq) =>
         if (seq < expectedSeq) sender ! SnapshotAck(key, seq)
         else if (seq == expectedSeq) {
-          val tuple = (Set.empty[ActorRef], sender, SnapshotAck(key, seq))
-          pendingRequests = pendingRequests + (seq -> tuple)
-          persist(key, valueOption, seq)
+          persist(key, valueOption, seq, SnapshotAck(key, seq))
           valueOption match {
             case Some(value) => kv = kv + (key -> value)
             case None => kv = kv - key
@@ -150,22 +147,30 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     }
 
   // UTILS
-  private def persist(key: String, valueOption: Option[String], id: Long): Unit = {
+  private def persist(key: String, valueOption: Option[String], id: Long, ack: Any): Unit = {
+    val tuple = pendingRequests.get(id) match {
+      case Some((waiting, requester, ack)) => (waiting + persistence, requester, ack)
+      case None => (Set(persistence), sender, ack)
+    }
+    pendingRequests = pendingRequests + (id -> tuple)
     cancellable = context.system.scheduler.schedule(0.milliseconds, 100.milliseconds, persistence, Persist(key, valueOption, id))
   }
 
   private def replicate(key: String, valueOption: Option[String], id: Long): Unit = {
-    val tuple = (replicasToReplicators.values.toSet, sender, OperationAck(id))
+    val tuple = pendingRequests.get(id) match {
+      case Some((waiting, requester, ack)) => (waiting ++ replicasToReplicators.values.toSet, requester, ack)
+      case None => (replicasToReplicators.values.toSet, sender, OperationAck(id))
+    }
     pendingRequests = pendingRequests + (id -> tuple)
     replicasToReplicators.values foreach (_ ! Replicate(key, valueOption, id))
   }
 
-  def updatePending(toRemove: ActorRef): Unit = {
-    pendingRequests = pendingRequests map {
-      case (id, value) =>
-        (id, value match {
-          case (waiting, requester, ack) => (waiting - toRemove, requester, ack)
-        })
+  def updatePending(id: Long, toRemove: ActorRef): Unit = {
+    pendingRequests.get(id) match {
+      case Some((waiting, requester, ack)) =>
+        val tuple = (waiting - toRemove, requester, ack)
+        pendingRequests = pendingRequests + (id -> tuple)
+      case None =>
     }
   }
 
@@ -175,6 +180,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         if (waiting.isEmpty) {
           requester ! ack
           pendingRequests = pendingRequests - id
+          context.setReceiveTimeout(Duration.Undefined)
         }
       case None =>
     }
