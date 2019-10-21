@@ -23,19 +23,22 @@ class Replicator(val replica: ActorRef) extends Actor {
   import context.dispatcher
 
   var seqCounter: Long = 0L
+  var pendingReplications: Map[Long, (Long, Cancellable, ActorRef)] = Map.empty
 
   def receive: Receive = {
     case Replicate(key, valueOption, id) =>
       replica ! Snapshot(key, valueOption, seqCounter)
       val cancellable = context.system.scheduler.schedule(200.milliseconds, 100.milliseconds, replica, Snapshot(key, valueOption, seqCounter))
-      context.become(waitingReplication(id, cancellable, sender))
-  }
-
-  def waitingReplication(id: Long, cancellable: Cancellable, requester: ActorRef): Receive = {
-    case SnapshotAck(key, _) =>
-      cancellable.cancel()
-      requester ! Replicated(key, id)
-      context.become(receive)
+      val tuple = (id, cancellable, sender)
+      pendingReplications = pendingReplications + (seqCounter -> tuple)
       seqCounter = seqCounter + 1
+
+    case SnapshotAck(key, seq) =>
+      pendingReplications.get(seq) match {
+        case Some((id, cancellable, requester)) =>
+          cancellable.cancel()
+          requester ! Replicated(key, id)
+        case None =>
+      }
   }
 }
